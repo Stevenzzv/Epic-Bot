@@ -4,6 +4,7 @@ const twilio = require("twilio");
 const OpenAI = require("openai");
 
 const app = express();
+console.log("KEY:", process.env.OPENAI_API_KEY);
 app.use(express.urlencoded({ extended: false }));
 
 const openai = new OpenAI({
