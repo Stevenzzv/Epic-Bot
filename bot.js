@@ -1,3 +1,6 @@
+process.on('uncaughtException', (err) => {
+  console.error('Error no capturado:', err);
+});
 // bot.js
 const express = require("express");
 const twilio = require("twilio");
