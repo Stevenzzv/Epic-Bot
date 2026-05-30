@@ -3,70 +3,107 @@ const express = require("express");
 const twilio = require("twilio");
 const OpenAI = require("openai");
 
+// Asegúrate de inicializar las variables de entorno correctamente
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+
 const app = express();
 app.use(express.urlencoded({ extended: false }));
+
+// Cliente REST de Twilio para enviar mensajes de forma asíncrona
+const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const esperar = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Memoria volátil en servidor (Para producción real, usa Redis o una Base de Datos)
+const historialConversaciones = {};
 
-async function preguntarAOpenAI(mensaje) {
-  const respuesta = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    max_tokens: 500,
-    messages: [
+async function generarRespuestaIA(telefonoUsuario, nuevoMensaje) {
+  // 1. Inicializar el historial del usuario si no existe
+  if (!historialConversaciones[telefonoUsuario]) {
+    historialConversaciones[telefonoUsuario] = [
       {
         role: "system",
-        content: `Eres el asistente virtual de Netly Core, una agencia de marketing digital especializada en sistemas de adquisición y automatización. 
-        Tu objetivo es atender dudas de prospectos sobre nuestros servicios de creación de landing pages, embudos de venta y estrategias digitales.
+        content: `Eres el asistente virtual de Netly Core, una agencia de marketing digital especializada en sistemas de adquisición y automatización para negocios y gimnasios. 
+        Tu objetivo es calificar y atender dudas de prospectos sobre nuestros servicios de creación de landing pages, embudos de venta y estrategias digitales de alta conversión.
         
         Pautas de comportamiento:
-        1. Sé un cerrador: Tu tono debe ser profesional, enérgico, persuasivo y muy amable.
-        2. Al grano: Responde de forma concisa y directa (máximo 2-3 párrafos cortos). Usa viñetas (bullet points) si listas beneficios o productos.
-        3. Formato WhatsApp: Usa negritas para resaltar palabras clave y añade emojis de forma estratégica (🚀, 🔥, 📈, 📲) para hacer el texto escaneable.
-        4. Llamado a la acción (CTA): Como no tienes memoria de la conversación, cierra siempre invitando al usuario a agendar una llamada rápida o a dejar sus datos para que un asesor lo contacte.`,
-      },
-      {
-        role: "user",
-        content: mensaje,
-      },
-    ],
+        1. Sé un cerrador: Tu tono debe ser profesional, enérgico, persuasivo, muy amable y enfocado en negocios (estilo high-performance).
+        2. Al grano: Responde de forma concisa y directa (máximo 2 párrafos cortos). Usa listas cortas si es necesario.
+        3. Formato WhatsApp: Usa negritas para resaltar palabras clave escribiendo entre asteriscos (ejemplo: *Netly Core*). Usa emojis de forma estratégica (🚀, 🔥, 📈, 📲). No uses guiones largos ni formatos Markdown complejos que WhatsApp no entienda.
+        4. Objetivo Final: Mantén el flujo de la conversación de forma natural. Si detectas alto interés, invita sutilmente al usuario a agendar una llamada rápida de 15 minutos para armar su estrategia.`,
+      }
+    ];
+  }
+
+  // 2. Agregar el mensaje actual del usuario al historial
+  historialConversaciones[telefonoUsuario].push({ role: "user", content: nuevoMensaje });
+
+  // Mantener solo los últimos 10 mensajes para no saturar el contexto/tokens
+  if (historialConversaciones[telefonoUsuario].length > 11) {
+    historialConversaciones[telefonoUsuario].splice(1, 2); // Remueve los dos más antiguos después del system prompt
+  }
+
+  // 3. Consultar a OpenAI con todo el contexto acumulado
+  const respuesta = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    max_tokens: 400,
+    temperature: 0.7, // Un toque de creatividad comercial, pero controlado
+    messages: historialConversaciones[telefonoUsuario],
   });
 
-  return respuesta.choices[0].message.content;
+  const textoRespuesta = respuesta.choices[0].message.content;
+
+  // 4. Guardar la respuesta del bot en el historial del usuario
+  historialConversaciones[telefonoUsuario].push({ role: "assistant", content: textoRespuesta });
+
+  return textoRespuesta;
 }
 
-// Twilio llama a este endpoint cuando llega un mensaje
+// Webhook optimizado contra Timeouts
 app.post("/webhook", async (req, res) => {
-  const mensaje = req.body.Body;
-  const de = req.body.From;
+  const mensajeUsuario = req.body.Body;
+  const telefonoUsuario = req.body.From; // Viene en formato 'whatsapp:+593xxxxxxx'
+  const telefonoBot = req.body.To;      // El número de tu Twilio Sandbox o número comercial
 
-  console.log(`📩 Mensaje de ${de}: ${mensaje}`);
+  console.log(`📩 Mensaje de ${telefonoUsuario}: ${mensajeUsuario}`);
 
-  await esperar(1500);
+  // 🔥 ESTRATEGIA CRÍTICA: Respondemos a Twilio INMEDIATAMENTE con un 200 OK vacío.
+  // Esto le dice a Twilio "Recibido, yo me encargo", evitando el timeout de 15 segundos.
+  res.status(200).send("<Response></Response>");
 
+  // El procesamiento pesado ocurre en segundo plano de manera asíncrona
   try {
-    console.log("🤖 Consultando a OpenAI...");
-    const respuesta = await preguntarAOpenAI(mensaje);
-    await esperar(1000);
+    console.log(`🤖 Procesando respuesta con IA para ${telefonoUsuario}...`);
+    const respuestaIA = await generarRespuestaIA(telefonoUsuario, mensajeUsuario);
 
-    const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message(respuesta);
+    // Enviamos el mensaje usando la API REST de Twilio, no el TwiML de retorno
+    await twilioClient.messages.create({
+      body: respuestaIA,
+      from: telefonoBot,
+      to: telefonoUsuario
+    });
 
-    res.type("text/xml");
-    res.send(twiml.toString());
-    console.log(`✅ Respuesta enviada: ${respuesta}`);
+    console.log(`✅ Respuesta enviada con éxito a ${telefonoUsuario}`);
   } catch (error) {
-    console.error("❌ Error:", error.message);
-    const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message("Lo siento, tuve un problema.");
-    res.type("text/xml");
-    res.send(twiml.toString());
+    console.error(`❌ Error procesando el mensaje para ${telefonoUsuario}:`, error.message);
+    
+    // Intento de enviar un mensaje de error amigable al usuario en caso de fallo en segundo plano
+    try {
+      await twilioClient.messages.create({
+        body: "Disculpa, experimenté un pequeño parpadeo digital. 📲 ¿Me podrías repetir tu última pregunta?",
+        from: telefonoBot,
+        to: telefonoUsuario
+      });
+    } catch (err) {
+      console.error("No se pudo enviar el mensaje de error por contingencia:", err.message);
+    }
   }
 });
 
-app.listen(3000, () => {
-  console.log("✅ Servidor corriendo en puerto 3000");
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor de Netly Core corriendo en el puerto ${PORT}`);
 });
